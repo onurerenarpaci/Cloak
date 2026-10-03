@@ -1,0 +1,33 @@
+---
+# Stop every Cloak process on the current host: binaries started from
+# {{ bin_dir }} and anything still listening on the Cloak ports.
+# Expects `bin_dir` and `cloak_ports` to be defined by the including play.
+
+- name: Stop Cloak processes and free ports {{ cloak_ports | join('/') }}
+  become: "{{ cloak_stop_as_root | default(true) | bool }}"
+  ansible.builtin.shell: |
+    port_pids() {
+      if command -v lsof >/dev/null 2>&1; then
+        lsof -nP -t -iTCP:"$1" -sTCP:LISTEN 2>/dev/null
+      elif command -v fuser >/dev/null 2>&1; then
+        fuser -n tcp "$1" 2>/dev/null
+      fi
+    }
+    pids=$(pgrep -f '^{{ bin_dir }}/(server|proxy|client)( |$)')
+    for port in {{ cloak_ports | join(' ') }}; do
+      pids="$pids $(port_pids "$port")"
+    done
+    pids=$(echo $pids)
+    if [ -z "$pids" ]; then echo "nothing to stop"; exit 0; fi
+    kill $pids 2>/dev/null
+    for i in 1 2 3 4 5; do
+      alive=""
+      for p in $pids; do kill -0 "$p" 2>/dev/null && alive="$alive $p"; done
+      [ -z "$alive" ] && break
+      sleep 1
+    done
+    [ -n "$alive" ] && kill -9 $alive 2>/dev/null
+    echo "stopped: $pids"
+  register: cloak_stop
+  changed_when: "'stopped' in cloak_stop.stdout"
+  timeout: 120

@@ -1,0 +1,14 @@
+netflix.xz is derived from "Netflix audience behaviour - UK movies" by VOD Clickstream
+(Stephen Follows, José Eliel Camargo-Molina et al.), Kaggle, 2021,
+https://www.kaggle.com/datasets/vodclickstream/netflix-audience-behaviour-uk-movies
+licensed under CC BY-NC-SA 3.0 IGO:
+https://creativecommons.org/licenses/by-nc-sa/3.0/igo/
+
+Changes: each row of vodclickstream_uk_movies_03.csv became one read request for
+its movie_id; rows were sorted by datetime (stable sort); movie_ids were relabeled
+to dense integers 0..M-1 in order of first appearance. No other fields are kept.
+See ../prep/netflix.py.
+
+netflix.xz is distributed under the same license, CC BY-NC-SA 3.0 IGO, and not
+under the MIT License that covers the code in this repository. The dataset's
+authors state that they are not affiliated with Netflix.

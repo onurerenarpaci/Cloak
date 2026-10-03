@@ -1,0 +1,74 @@
+Provenance: workload `alibaba-dev38` (Table 2 "Alibaba dev. 38")
+================================================================
+
+Source
+  Alibaba block traces 2020: production elastic block storage, 1000
+  virtual disks over 31 days. https://github.com/alibaba/block-traces
+  (CC-BY 4.0). Release tarball (~194 GB, streamed, never stored):
+  http://block-traces.oss-cn-beijing.aliyuncs.com/alibaba_block_traces_2020.tar.gz
+  Device used: 38 (50 GiB virtual disk; 100% writes in the window).
+
+Capture (fetch_alibaba.sh)
+  `tar -xzO` of the tarball, prefiltered with grep '^(38|206),', device 38
+  lines zstd-compressed to alibaba-dev38-raw.zst; the capture ends after
+  100,000 consecutive prefiltered lines past 2020-01-08 00:00:30 +08:00
+  (7-day cutoff + 30 s). Device 206 is in the prefilter only because the
+  original capture took both devices and its stop rule counted both.
+
+Record mapping
+  CSV: device_id,opcode(R/W),offset,length,timestamp(us)
+  Each I/O becomes one request per 4 KiB page it touches:
+    pages = offset // 4096 .. (offset + length - 1) // 4096
+  R -> `key`, W -> `key 1`. Page id = "38:<page>". Records pass through a
+  65,536-record sliding min-heap on timestamp to smooth local disorder.
+  Page size 4096 was picked by maximizing
+  frac(I/Os inside one page) - frac(I/Os falsely sharing a page with a
+  byte-disjoint I/O) over 512 B .. 64 KiB on the first 2.5M I/Os of the
+  device: 4096 -> +0.355 (best), 8192 -> -0.450; no I/O fits in <= 2 KiB.
+
+Window
+  First 7 days of the trace: 2020-01-01 00:00:00 +08:00 (timestamp
+  1577808000000000 us) .. cutoff 1578412800000000 us (I/Os with a later
+  timestamp are dropped); no caps.
+
+Survey (unsampled pass over the window)
+  raw I/Os           229,982,978
+  page requests      797,567,725 (100% writes)
+  distinct pages     2,874,345 (the write working set plateaus at ~2.6M
+                     pages, ~11 GiB of the 50 GiB device)
+
+Sampling (spatial hash / SHARDS, block_pipeline.py)
+  keep page iff BLAKE2b-64("38:<page>", key="cloak1") < threshold
+  threshold          6415815174883080656
+                     (= the 1,000,000-th smallest distinct-page hash + 1,
+                     i.e. rate 0.3478020375436851)
+  Every request to a kept page is emitted, in time order.
+
+1M-page workload (whole 7 days)
+  requests           275,089,919 (100% writes)
+  distinct pages     1,000,000 exactly (dense, first-appearance order)
+
+Result (the paper workload) = the first 10,000,000 requests of the 1M-page
+workload (`head -n 10000000`; equivalently `emit --max-requests 10000000`)
+  requests           10,000,000
+  distinct keys      246,600 (0..246,599)
+  writes             10,000,000 (100%) -> R/W 0/100
+  sha256             77abbd5dd92b725795fd7cecc2d9b523eae47a8ee1091c42cba68b6e02f8aca4
+  Table 2 #Elements  1,000,000 (= storage_size: the server holds all pages of
+                     the 1M-page workload; the 10M-request prefix touches
+                     246,600 of them)
+
+Regenerate
+  ./fetch_alibaba.sh data/ali            # 7-day capture (as in the paper)
+  # or a shorter capture that still covers the 10M-request prefix:
+  # ./fetch_alibaba.sh data/ali 1577894400000000   (first 24 h)
+  python3 block_pipeline.py emit ali --raw data/ali/alibaba-dev38-raw.zst \
+      --device 38 --page-size 4096 --hash-threshold 6415815174883080656 \
+      --max-requests 10000000 --out out/alibaba-dev38
+  # full method (needs the 7-day capture):
+  python3 block_pipeline.py survey ali --raw data/ali/alibaba-dev38-raw.zst \
+      --device 38 --page-size 4096 --out data/ali/dev38-survey
+  python3 block_pipeline.py emit ali --raw data/ali/alibaba-dev38-raw.zst \
+      --device 38 --page-size 4096 --survey data/ali/dev38-survey \
+      --target 1000000 --out out/alibaba-dev38-1m-full
+  head -n 10000000 out/alibaba-dev38-1m-full > out/alibaba-dev38

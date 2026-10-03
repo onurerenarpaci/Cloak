@@ -1,0 +1,38 @@
+# Table 2 dataset: twitter52
+# The same file is used for both modes: Cloak (as is) and the unsafe baseline
+# (run.sh adds --proxy-is-unsafe true). run.sh also sets the client rate of
+# each mode with --client-req-per-sec and the workload with --client-input-file.
+
+[common]
+# Placeholder addresses; the harness injects the real ones with
+# --common-server-addr / --common-proxy-addr.
+server_addr = "127.0.0.1:4000"
+server_addr_bind = "0.0.0.0:4000"
+proxy_addr = "127.0.0.1:5050"
+proxy_addr_bind = "0.0.0.0:5050"
+
+object_size = 1024              # element size in bytes (1 KB)
+crypto_overhead = 32            # bytes added to each stored element by encryption
+storage_size = 772345           # number of elements stored on the server
+
+[server]
+max_read_size = 10000000        # maximum batch read size
+
+[proxy]
+first_batch_size = 433          # budget of the most recent reuse-distance set;
+                                # batch size = sum of all budgets = 3810
+queue_coefficient = 2           # proxy queue capacity = 2 x batch size
+cache_size = 10000              # proxy cache entries (mini-moka: TinyLFU admission, LRU eviction)
+num_threads = 16                # worker threads
+budget_log_file = "budget_log.txt"
+is_unsafe = false               # run.sh passes --proxy-is-unsafe true for the unsafe baseline
+batch_interval_ms = 20          # a batch is issued every 20 ms
+enable_budget_log = false       # disabled for these runs, so no ratio file is produced
+
+[client]
+num_clients = 1
+req_per_sec = 200000            # saturation-probe rate; run.sh overrides it per mode
+input_file = "twitter52"        # placeholder; run.sh passes --client-input-file
+output_file = "client_output.txt"
+stats_file = "stats.csv"
+enable_output_log = false

@@ -1,0 +1,34 @@
+# Cloak cluster inventory: copy this file to ansible/inventory and fill in
+# your three machines (one host per group).
+#
+#   ansible_host   address Ansible uses to reach the machine over SSH
+#   private_ip     optional; address the Cloak components use to reach each
+#                  other, if different from ansible_host. Defaults to
+#                  ansible_host.
+#
+# The machines must run Ubuntu 22.04 or 24.04 with passwordless sudo for
+# ansible_user, and must accept TCP connections from each other on ports
+# 4000 (server) and 5050 (proxy), on the addresses used here.
+#
+# On AWS, use the instances' public IPs and leave private_ip unset to
+# reproduce the paper's numbers: over VPC-internal IPs (jumbo frames) the
+# Netflix dataset runs several times slower. See "Network path" in the
+# top-level README.md.
+
+[server]
+cloak-server ansible_host=203.0.113.10
+# with a separate network between the machines:
+# cloak-server ansible_host=203.0.113.10 private_ip=10.0.0.10
+
+[proxy]
+cloak-proxy ansible_host=203.0.113.11
+
+[client]
+cloak-client ansible_host=203.0.113.12
+
+[all:vars]
+ansible_user=ubuntu
+ansible_ssh_private_key_file=~/.ssh/your-key.pem
+# Where the sources, binaries and run directory live on each machine
+# (default: <home of ansible_user>/cloak).
+# cloak_dir=/home/ubuntu/cloak

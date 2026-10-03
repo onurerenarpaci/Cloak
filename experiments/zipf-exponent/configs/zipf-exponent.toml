@@ -1,0 +1,37 @@
+# Cloak configuration for the Zipf-exponent sweep (Figure 3, column 1).
+#
+# Values are the ones used for the paper. Sweep parameters are NOT edited
+# here: run.sh passes them as command-line overrides (see README.md).
+# Addresses are placeholders; the harness injects the real ones with
+# --common-server-addr / --common-proxy-addr. All file names are relative to
+# the per-run working directory the harness starts the binaries in.
+
+[common]
+server_addr = "127.0.0.1:4000"      # storage server address (injected by the harness)
+server_addr_bind = "0.0.0.0:4000"
+proxy_addr = "127.0.0.1:5050"       # proxy address (injected by the harness)
+proxy_addr_bind = "0.0.0.0:5050"
+object_size = 1024                  # element size in bytes
+crypto_overhead = 32                # ciphertext bytes added per element (encrypted size = object_size + this)
+storage_size = 1000000              # number of elements N
+
+[server]
+max_read_size = 10000000            # maximum batch read size
+
+[proxy]
+first_batch_size = 433              # budget of reuse-distance set 1; batch size = sum of budgets
+queue_coefficient = 2               # request-queue capacity = coefficient x batch size
+cache_size = 1000                   # proxy cache entries (mini-moka: TinyLFU admission, LRU eviction)
+num_threads = 16                    # worker threads
+budget_log_file = "budget_log.txt"  # per-batch budget usage, turned into ratio.csv
+is_unsafe = false                   # true = non-oblivious baseline
+batch_interval_ms = 20              # batching interval
+enable_budget_log = true
+
+[client]
+num_clients = 1
+req_per_sec = 1000000               # target rate; run.sh sets it per workload
+input_file = "workload.txt"         # placeholder; the harness passes --client-input-file
+output_file = "client_output.txt"   # per-query log (only if enable_output_log)
+stats_file = "stats.csv"            # one-row summary, collected by the harness
+enable_output_log = false

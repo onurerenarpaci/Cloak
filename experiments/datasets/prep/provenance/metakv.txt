@@ -1,0 +1,56 @@
+Provenance: workload `metakv` (Table 2 "Meta KV")
+=================================================
+
+Source
+  Meta CacheLib key-value cache traces, 202401 release, from the cacheMon
+  open-source cache dataset, https://github.com/cacheMon/cache_dataset
+  (CC-BY 4.0). Files (5-day capture, streamed in this order):
+  https://cache-datasets.s3.amazonaws.com/cache_dataset_txt/2022_metaKV/kvcache_202401/kvcache_traces_{1..5}.csv.zst
+
+Record mapping
+  CSV: op_time,key,key_size,op,op_count,size,cache_hits,ttl,usecase,sub_usecase
+  GET, GET_LEASE -> read  (`key`)
+  SET, SET_LEASE -> write (`key 1`)
+  DELETE         -> dropped (counted)
+  One CSV row = one request (op_count is ignored). No pagination.
+
+Sampling (spatial hash / SHARDS, kv_pipeline.py)
+  keep request iff BLAKE2b-64(key, key="cloak1") / 2^64 < rate
+
+  Stage 1, collect:
+    rate               0.2
+    max-keep cap       30,000,000
+    raw lines read     152,409,269 (including the CSV header line)
+    requests kept      30,000,000 (21.2% writes)   <- --max-keep cap
+    distinct objects   3,722,831
+    dropped (DELETE)   2,762,788
+    stop reason        max_keep
+    trace time span    op_time 604,038,471 .. 604,123,542 (seconds on the
+                       trace's own epoch, 1 s resolution) = 23.6 h from the
+                       start of the capture
+
+  Stage 2, regen:
+    caps               10,000,000 requests / 1,250,000 distinct keys
+    rate               0.053125000000000006
+                       (binary search for 1M distinct keys, tolerance 5%)
+    stop reason        sample_exhausted (the whole 23.6 h stage-1 window is
+                       used, hence fewer than 10M requests)
+
+Result (the paper workload)
+  requests           7,965,502
+  distinct keys      988,762 (dense, first-appearance order: 0..988,761)
+  writes             1,691,449 (21.2%) -> R/W 79/21
+  Zipf exponent fit  0.855 (LS fit over the top 10k ranks)
+  one-hit objects    10.4%
+  sha256             4414d88da938b1c47993e67996941b30482580de6f7013a3fe098ea9f07fbeeb
+  Table 2 #Elements  988,762 (= storage_size)
+
+Note: op_time has 1 s resolution and rows aggregate repeated operations
+(op_count), which distorts the head of the reuse-interval histogram;
+popularity statistics are unaffected.
+
+Regenerate
+  ./fetch_kv.sh metakv data/kv
+  python3 kv_pipeline.py regen data/kv/metakv-sample \
+      --rate 0.053125000000000006 --cap 10000000 --key-cap 1250000 \
+      --out out/metakv

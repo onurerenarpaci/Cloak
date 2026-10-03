@@ -1,0 +1,164 @@
+---
+# Prepare the three machines and build Cloak on each of them.
+#
+#   ansible-playbook -i inventory deploy.yml
+#
+# Installs the build dependencies and a Rust toolchain (via rustup, for the
+# SSH user), copies src/, Cargo.toml and Cargo.lock to {{ cloak_dir }}, runs
+# `cargo build --release` and checks that the four binaries are up to date.
+# Safe to re-run after changing the sources.
+#
+# Tags: `setup` (packages, Rust toolchain) and `build` (copy sources, build);
+# after changing the sources, `--tags build` is enough.
+#
+# Optional variables (inventory or -e):
+#   cloak_dir                 install directory (default: ~/cloak of the SSH user)
+#   rust_toolchain            rustup toolchain to install (default: stable)
+#   cloak_mask_apt_timers     mask apt-daily / apt-daily-upgrade (default: true)
+
+- name: Install dependencies and build Cloak
+  hosts: server:proxy:client
+  gather_facts: true
+  gather_subset: [min]
+  vars:
+    cloak_home: "{{ cloak_dir | default(ansible_user_dir ~ '/cloak') }}"
+    cloak_src_root: "{{ playbook_dir | dirname }}"
+    cargo_bin: "{{ ansible_user_dir }}/.cargo/bin"
+    rust_toolchain: stable
+    cloak_binaries: [server, proxy, client, budget_ratio]
+    apt_packages:
+      - build-essential
+      - pkg-config
+      - libssl-dev
+      - ca-certificates
+      - curl
+      - lsof
+      - procps
+
+  tasks:
+    - name: Check that the host runs Ubuntu/Debian
+      tags: [setup]
+      ansible.builtin.assert:
+        that: ansible_os_family == 'Debian'
+        fail_msg: "Cloak's playbooks expect Ubuntu 22.04/24.04 (found {{ ansible_distribution }})."
+
+    - name: Wait for cloud-init to finish (fresh cloud VMs run apt right after boot)
+      tags: [setup]
+      ansible.builtin.command: cloud-init status --wait
+      register: cloud_init
+      changed_when: false
+      failed_when: false
+      timeout: 1200
+
+    # On fresh cloud images these timers fire ~30 min after boot, take the dpkg
+    # lock and may restart services in the middle of a measurement.
+    - name: Stop and mask the apt-daily timers
+      tags: [setup]
+      become: true
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+        masked: true
+      loop: [apt-daily.timer, apt-daily-upgrade.timer]
+      when: cloak_mask_apt_timers | default(true) | bool
+
+    - name: Install build dependencies
+      tags: [setup]
+      become: true
+      ansible.builtin.apt:
+        name: "{{ apt_packages }}"
+        update_cache: true
+        cache_valid_time: 3600
+        lock_timeout: 900 # wait for a concurrent apt/unattended-upgrades run
+      register: apt_result
+      until: apt_result is succeeded
+      retries: 3
+      delay: 30
+      timeout: 2400
+
+    - name: Install rustup and the Rust toolchain for {{ ansible_user_id }}
+      tags: [setup]
+      ansible.builtin.shell: |
+        set -o pipefail
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+          | sh -s -- -y --no-modify-path --profile minimal --default-toolchain {{ rust_toolchain }}
+      args:
+        executable: /bin/bash
+        creates: "{{ cargo_bin }}/rustup"
+      timeout: 1200
+
+    - name: Make {{ rust_toolchain }} the default toolchain
+      tags: [setup]
+      ansible.builtin.command: "{{ cargo_bin }}/rustup default {{ rust_toolchain }}"
+      register: rustup_default
+      changed_when: "'installed' in rustup_default.stdout + rustup_default.stderr"
+      timeout: 1200
+
+    - name: Create {{ cloak_home }}
+      tags: [build]
+      ansible.builtin.file:
+        path: "{{ cloak_home }}"
+        state: directory
+        mode: "0755"
+
+    # Removing the old copy first makes sure no stale source file (e.g. a
+    # deleted src/bin/*.rs) survives and gets compiled.
+    - name: Remove the previous copy of the sources
+      tags: [build]
+      ansible.builtin.file:
+        path: "{{ cloak_home }}/src"
+        state: absent
+
+    - name: Copy the sources
+      tags: [build]
+      ansible.builtin.copy:
+        src: "{{ cloak_src_root }}/{{ item }}"
+        dest: "{{ cloak_home }}/"
+        mode: preserve
+      loop: [src, Cargo.toml, Cargo.lock]
+      timeout: 600
+
+    - name: Build (cargo build --release)
+      tags: [build]
+      ansible.builtin.command:
+        argv: ["{{ cargo_bin }}/cargo", build, --release, --locked]
+        chdir: "{{ cloak_home }}"
+      environment:
+        PATH: "{{ cargo_bin }}:{{ ansible_env.PATH }}"
+      register: cargo_build
+      changed_when: "'Compiling' in cargo_build.stderr"
+      async: 3600
+      poll: 15
+
+    - name: Check that the binaries exist and are newer than every source file
+      tags: [build]
+      ansible.builtin.shell: |
+        status=0
+        for b in {{ cloak_binaries | join(' ') }}; do
+          bin=target/release/$b
+          if [ ! -x "$bin" ]; then
+            echo "missing $bin"; status=1
+          elif [ -n "$(find src Cargo.toml Cargo.lock -newer "$bin" -print -quit)" ]; then
+            echo "stale $bin"; status=1
+          else
+            echo "ok $bin"
+          fi
+        done
+        exit $status
+      args:
+        chdir: "{{ cloak_home }}"
+      register: binary_check
+      changed_when: false
+
+    - name: Create the run and workload directories
+      tags: [build]
+      ansible.builtin.file:
+        path: "{{ cloak_home }}/{{ item }}"
+        state: directory
+        mode: "0755"
+      loop: [run, workloads]
+
+    - name: Report
+      tags: [build]
+      ansible.builtin.debug:
+        msg: "Cloak built in {{ cloak_home }}: {{ binary_check.stdout_lines | join(', ') }}"

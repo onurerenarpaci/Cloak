@@ -1,0 +1,33 @@
+---
+# Wait until the Cloak binary `wait_name` (started by run.yml, which writes its
+# PID to {{ run_dir }}/<wait_name>.pid) listens on TCP port `wait_port`.
+# Fails early if the process exits first. The check is passive (ss, or lsof
+# where ss is missing) and never connects: the server exits on a connection
+# without the proxy handshake, and the proxy takes the first connection on its
+# port as its one and only client.
+
+- name: Wait until the {{ wait_name }} listens on port {{ wait_port }}
+  ansible.builtin.shell: |
+    pidfile={{ run_dir }}/{{ wait_name }}.pid
+    listening() {
+      if command -v ss >/dev/null 2>&1; then
+        ss -lnt | awk '{print $4}' | grep -Eq '[:.]{{ wait_port }}$'
+      else
+        lsof -nP -t -iTCP:{{ wait_port }} -sTCP:LISTEN >/dev/null 2>&1
+      fi
+    }
+    end=$(( $(date +%s) + {{ wait_timeout }} ))
+    while [ "$(date +%s)" -lt "$end" ]; do
+      if [ -s "$pidfile" ] && ! kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+        echo "the {{ wait_name }} exited before listening on port {{ wait_port }}" >&2
+        exit 1
+      fi
+      if listening; then
+        exit 0
+      fi
+      sleep 1
+    done
+    echo "the {{ wait_name }} did not listen on port {{ wait_port }} within {{ wait_timeout }} s" >&2
+    exit 1
+  changed_when: false
+  timeout: "{{ (wait_timeout | int) + 60 }}"

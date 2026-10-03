@@ -1,0 +1,273 @@
+---
+# Run ONE repetition of a Cloak experiment on the 3-machine cluster.
+# Normally called by experiments/<name>/run.sh (via experiments/common.sh),
+# which then appends the fetched rows to the experiment's result files.
+#
+#   ansible-playbook -i inventory run.yml -e @vars.json
+#
+# Required variables (local paths on the machine running Ansible):
+#   config_file    Cloak TOML config
+#   workload_file  decompressed workload (one request per line)
+#   out_dir        directory that receives stats.csv, ratio.csv (if the
+#                  config enables the budget log) and the binaries' logs
+# Optional:
+#   extra_args          list (or space-separated string) of extra binary
+#                       flags, passed to server, proxy and client alike,
+#                       e.g. ["--client-req-per-sec", "151000"]
+#   run_timeout         max client run time in s (default: derived from the
+#                       workload length and request rate, see below)
+#   startup_timeout     max time for server start + proxy storage init (1800)
+#   proxy_exit_timeout  max time for the proxy to exit after the client (900)
+#   cloak_dir           install directory used by deploy.yml (default ~/cloak)
+#   server_port / proxy_port  TCP ports (default 4000 / 5050; injected into
+#                       the binaries together with the addresses)
+#
+# Sequence: kill leftovers -> server -> proxy (waits until it has
+# initialised the storage and listens) -> client -> wait for client and
+# proxy -> budget_ratio -> fetch results -> stop everything (always runs).
+
+- name: Run one Cloak repetition
+  hosts: server:proxy:client
+  gather_facts: true
+  gather_subset: [min]
+  # a failure on any host during the checks ends the run on all hosts.
+  # Inside the block below, a host that fails waits for the others to reach
+  # the `always` section (which then stops everything everywhere); the
+  # remaining steps fail fast on their own (e.g. a proxy without a server
+  # exits at once), and the proxy wait is skipped if the client failed.
+  any_errors_fatal: true
+  vars:
+    cloak_home: "{{ cloak_dir | default(ansible_user_dir ~ '/cloak') }}"
+    bin_dir: "{{ cloak_home }}/target/release"
+    run_dir: "{{ cloak_home }}/run"
+    remote_workload: "{{ cloak_home }}/workloads/{{ workload_file | basename }}"
+    server_port: 4000
+    proxy_port: 5050
+    cloak_ports: ["{{ server_port }}", "{{ proxy_port }}"]
+    budget_log_name: budget_log.txt
+
+    server_host: "{{ groups['server'][0] }}"
+    proxy_host: "{{ groups['proxy'][0] }}"
+    client_host: "{{ groups['client'][0] }}"
+    server_ip: "{{ hostvars[server_host].private_ip | default(hostvars[server_host].ansible_host | default(server_host)) }}"
+    proxy_ip: "{{ hostvars[proxy_host].private_ip | default(hostvars[proxy_host].ansible_host | default(proxy_host)) }}"
+
+    extra_list: "{{ (extra_args | default([]) | split) if (extra_args | default([]) is string) else (extra_args | default([])) }}"
+    cloak_args: "{{ ['--config', 'config.toml',
+                     '--common-server-addr', server_ip ~ ':' ~ server_port,
+                     '--common-proxy-addr', proxy_ip ~ ':' ~ proxy_port,
+                     '--common-server-addr-bind', '0.0.0.0:' ~ server_port,
+                     '--common-proxy-addr-bind', '0.0.0.0:' ~ proxy_port] + extra_list }}"
+    # `sh -c` records the PID (so the wait tasks can tell "still starting"
+    # from "crashed") and sends the binary's output to <name>.log in run_dir.
+    pid_wrapper: ["/bin/sh", "-c", 'n=$(basename "$0"); echo $$ > "$n.pid"; exec "$0" "$@" > "$n.log" 2>&1']
+
+    startup_timeout: 1800
+    proxy_exit_timeout: 900
+    poll_interval: 5
+    # default client timeout: max(run_timeout_min, run_timeout_factor x requests / rate)
+    run_timeout_min: 1800
+    run_timeout_factor: 10
+
+  tasks:
+    - name: Check the inventory and the input files
+      ansible.builtin.assert:
+        that:
+          - groups['server'] | default([]) | length == 1
+          - groups['proxy'] | default([]) | length == 1
+          - groups['client'] | default([]) | length == 1
+          - config_file is defined and config_file is file
+          - workload_file is defined and workload_file is file
+          - out_dir is defined
+        fail_msg: >-
+          Need exactly one host in each of the groups server, proxy and client,
+          and existing local files config_file / workload_file plus out_dir.
+      run_once: true
+
+    - name: Check that extra_args do not repeat flags set by this playbook
+      ansible.builtin.assert:
+        that: extra_list | map('regex_replace', '=.*$', '') | intersect(reserved_flags) | length == 0
+        fail_msg: "extra_args must not contain {{ reserved_flags | join(', ') }} (set by run.yml)"
+      vars:
+        reserved_flags: [--config, --client-input-file, --common-server-addr, --common-proxy-addr,
+                         --common-server-addr-bind, --common-proxy-addr-bind]
+      run_once: true
+
+    - name: Derive the client timeout from the workload length and request rate
+      ansible.builtin.set_fact:
+        client_timeout: "{{ run_timeout | default([run_timeout_min | int, (run_timeout_factor | int) * (n_requests | int) // (rate | int)] | max) | int }}"
+      vars:
+        n_requests: "{{ lookup('ansible.builtin.pipe', 'wc -l < ' ~ (workload_file | quote)) | int }}"
+        rate_from_args: >-
+          {%- set ns = namespace(v='') -%}
+          {%- for a in extra_list -%}
+          {%- if a is string and a.startswith('--client-req-per-sec=') -%}{%- set ns.v = a.split('=')[1] -%}
+          {%- elif loop.index0 > 0 and extra_list[loop.index0 - 1] == '--client-req-per-sec' -%}{%- set ns.v = a -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {{ ns.v }}
+        rate_from_config: "{{ lookup('ansible.builtin.file', config_file) | regex_findall('(?m)^\\s*req_per_sec\\s*=\\s*(\\d+)') | first | default(0) }}"
+        rate: "{{ [(rate_from_args if rate_from_args | length > 0 else rate_from_config) | int, 1] | max }}"
+
+    - name: Check that Cloak is built (run deploy.yml first)
+      ansible.builtin.stat:
+        path: "{{ bin_dir }}/{{ item }}"
+      loop: "{{ (['server'] if inventory_hostname == server_host else [])
+                + (['proxy', 'budget_ratio'] if inventory_hostname == proxy_host else [])
+                + (['client'] if inventory_hostname == client_host else []) }}"
+      register: binaries
+
+    - name: Fail if a binary is missing
+      ansible.builtin.assert:
+        that: binaries.results | rejectattr('stat.exists') | list | length == 0
+        fail_msg: >-
+          {{ binaries.results | rejectattr('stat.exists') | map(attribute='item') | join(', ') }}
+          not found in {{ bin_dir }}: run ansible/deploy.yml first.
+        quiet: true
+
+    - name: Run the experiment
+      block:
+        - name: Stop leftovers from earlier runs
+          ansible.builtin.include_tasks: tasks/stop-cloak.yml
+
+        - name: Recreate the run directory
+          ansible.builtin.file:
+            path: "{{ run_dir }}"
+            state: "{{ item }}"
+            mode: "0755"
+          loop: [absent, directory]
+
+        - name: Copy the config
+          ansible.builtin.copy:
+            src: "{{ config_file }}"
+            dest: "{{ run_dir }}/config.toml"
+            mode: "0644"
+          timeout: 300
+
+        - name: Create the workload directory on the client
+          ansible.builtin.file:
+            path: "{{ remote_workload | dirname }}"
+            state: directory
+            mode: "0755"
+          when: inventory_hostname == client_host
+
+        - name: Copy the workload to the client
+          ansible.builtin.copy:
+            src: "{{ workload_file }}"
+            dest: "{{ remote_workload }}"
+            mode: "0644"
+          when: inventory_hostname == client_host
+          timeout: 3600
+
+        - name: Start the server
+          ansible.builtin.command:
+            argv: "{{ pid_wrapper + [bin_dir ~ '/server'] + cloak_args }}"
+            chdir: "{{ run_dir }}"
+          async: "{{ 2 * (startup_timeout | int) + (client_timeout | int) + (proxy_exit_timeout | int) + 600 }}"
+          poll: 0
+          register: server_job
+          changed_when: true
+          when: inventory_hostname == server_host
+
+        - name: Wait for the server
+          ansible.builtin.include_tasks: tasks/wait-listen.yml
+          vars:
+            wait_name: server
+            wait_port: "{{ server_port }}"
+            wait_timeout: 300
+          when: inventory_hostname == server_host
+
+        - name: Start the proxy (initialises the storage before it listens)
+          ansible.builtin.command:
+            argv: "{{ pid_wrapper + [bin_dir ~ '/proxy'] + cloak_args }}"
+            chdir: "{{ run_dir }}"
+          async: "{{ (startup_timeout | int) + (client_timeout | int) + (proxy_exit_timeout | int) + 300 }}"
+          poll: 0
+          register: proxy_job
+          changed_when: true
+          when: inventory_hostname == proxy_host
+
+        - name: Wait for the proxy
+          ansible.builtin.include_tasks: tasks/wait-listen.yml
+          vars:
+            wait_name: proxy
+            wait_port: "{{ proxy_port }}"
+            wait_timeout: "{{ startup_timeout }}"
+          when: inventory_hostname == proxy_host
+
+        - name: Start the client
+          ansible.builtin.command:
+            argv: "{{ pid_wrapper + [bin_dir ~ '/client'] + cloak_args + ['--client-input-file', remote_workload] }}"
+            chdir: "{{ run_dir }}"
+          async: "{{ (client_timeout | int) + 60 }}"
+          poll: 0
+          register: client_job
+          changed_when: true
+          when: inventory_hostname == client_host
+
+        - name: Wait for the client to finish (timeout {{ client_timeout }} s)
+          ansible.builtin.async_status:
+            jid: "{{ client_job.ansible_job_id }}"
+          register: client_result
+          until: client_result is finished
+          retries: "{{ (client_timeout | int) // (poll_interval | int) + 1 }}"
+          delay: "{{ poll_interval }}"
+          when: inventory_hostname == client_host
+
+        - name: Wait for the proxy to exit
+          ansible.builtin.async_status:
+            jid: "{{ proxy_job.ansible_job_id }}"
+          register: proxy_result
+          until: proxy_result is finished
+          retries: "{{ (proxy_exit_timeout | int) // (poll_interval | int) + 1 }}"
+          delay: "{{ poll_interval }}"
+          # a client that failed or timed out may leave the proxy serving its
+          # connection: skip the wait (the cleanup below stops the proxy)
+          when: inventory_hostname == proxy_host and hostvars[client_host].client_result is succeeded
+
+        - name: Look for the proxy's budget log
+          ansible.builtin.stat:
+            path: "{{ run_dir }}/{{ budget_log_name }}"
+          register: budget_log
+          when: inventory_hostname == proxy_host
+
+        - name: Compute batch utilisation (ratio.csv)
+          ansible.builtin.command:
+            argv: ["{{ bin_dir }}/budget_ratio", "{{ budget_log_name }}", ratio.csv]
+            chdir: "{{ run_dir }}"
+          changed_when: true
+          timeout: 900
+          when: inventory_hostname == proxy_host and budget_log.stat.exists
+
+        - name: Fetch stats.csv from the client
+          ansible.builtin.fetch:
+            src: "{{ run_dir }}/stats.csv"
+            dest: "{{ out_dir }}/stats.csv"
+            flat: true
+            fail_on_missing: true
+          timeout: 300
+          when: inventory_hostname == client_host
+
+        - name: Fetch ratio.csv from the proxy
+          ansible.builtin.fetch:
+            src: "{{ run_dir }}/ratio.csv"
+            dest: "{{ out_dir }}/ratio.csv"
+            flat: true
+            fail_on_missing: true
+          timeout: 300
+          when: inventory_hostname == proxy_host and budget_log.stat.exists
+
+      always:
+        - name: Stop all Cloak processes
+          ansible.builtin.include_tasks: tasks/stop-cloak.yml
+
+        - name: Fetch the binaries' logs
+          ansible.builtin.fetch:
+            src: "{{ run_dir }}/{{ item }}.log"
+            dest: "{{ out_dir }}/{{ item }}.log"
+            flat: true
+            fail_on_missing: false
+          loop: "{{ (['server'] if inventory_hostname == server_host else [])
+                    + (['proxy'] if inventory_hostname == proxy_host else [])
+                    + (['client'] if inventory_hostname == client_host else []) }}"
+          timeout: 300

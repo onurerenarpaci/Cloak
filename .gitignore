@@ -1,0 +1,33 @@
+# Rust build output
+/target/
+
+# Decompressed workloads, harness locks
+/.cache/
+
+# Your cluster inventory (copy of ansible/inventory.example)
+/ansible/inventory
+
+# Experiment outputs (paper-results/ is tracked)
+/experiments/*/results/
+/experiments/*/results-smoke/
+/local-test/results/
+
+# Dataset preparation: raw downloads and regenerated workloads
+/experiments/datasets/prep/data/
+/experiments/datasets/prep/out/
+# MSR prxy is not redistributed; prep/make_workloads.sh msr-prxy installs it here
+/experiments/datasets/workloads/msr-prxy.xz
+
+# Generated figures and tables
+/plots/out/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Editors and OS
+.DS_Store
+*.swp
+.idea/
+.vscode/

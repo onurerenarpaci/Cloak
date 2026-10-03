@@ -1,0 +1,17 @@
+---
+# Stop all Cloak processes on the cluster (e.g. after interrupting a sweep
+# with Ctrl-C). run.yml does this itself at the start and end of every run.
+#
+#   ansible-playbook -i inventory stop.yml
+
+- name: Stop Cloak on all machines
+  hosts: server:proxy:client
+  gather_facts: true
+  gather_subset: [min]
+  vars:
+    cloak_home: "{{ cloak_dir | default(ansible_user_dir ~ '/cloak') }}"
+    bin_dir: "{{ cloak_home }}/target/release"
+    cloak_ports: ["{{ server_port | default(4000) }}", "{{ proxy_port | default(5050) }}"]
+  tasks:
+    - name: Stop Cloak processes
+      ansible.builtin.include_tasks: tasks/stop-cloak.yml

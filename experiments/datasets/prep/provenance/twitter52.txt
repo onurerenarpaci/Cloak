@@ -1,0 +1,54 @@
+Provenance: workload `twitter52` (Table 2 "Twitter 52")
+=======================================================
+
+Source
+  Twitter Twemcache production traces, cluster 52 (one week, March 2020).
+  Yang, Yue, Rashmi, "A large scale analysis of hundreds of in-memory cache
+  clusters at Twitter", OSDI '20. Released at
+  https://github.com/twitter/cache-trace (CC-BY 4.0); file used:
+  https://ftp.pdl.cmu.edu/pub/datasets/twemcacheWorkload/open_source/cluster52.sort.zst
+
+Record mapping
+  CSV: timestamp,key,key_size,value_size,client_id,operation,ttl
+  get, gets                                         -> read  (`key`)
+  set, add, replace, cas, append, prepend, incr, decr -> write (`key 1`)
+  delete                                            -> dropped (counted)
+  Key = the anonymized key string; no pagination.
+
+Sampling (spatial hash / SHARDS, kv_pipeline.py)
+  keep request iff BLAKE2b-64(key, key="cloak1") / 2^64 < rate
+
+  Stage 1, collect (streamed, raw trace never stored):
+    rate               0.05
+    max-keep cap       30,000,000
+    raw lines read     617,289,256
+    requests kept      30,000,000 (6.5% writes)   <- --max-keep cap
+    distinct objects   1,632,719
+    dropped (delete)   3,983,978
+    stop reason        max_keep
+    trace time span    0 .. 29,318 s (relative timestamps; ~8.1 h from
+                       the start of the trace)
+
+  Stage 2, regen (nested rate; contiguous prefix of the filtered stream):
+    caps               10,000,000 requests / 1,250,000 distinct keys
+    rate               0.049951171875000006
+                       (binary search for 1M distinct keys, tolerance 5%,
+                       10 iterations; at the collect rate the 10M-request
+                       window only holds ~772K objects, so the search
+                       converges just below 0.05)
+    stop reason        request_cap
+
+Result (the paper workload)
+  requests           10,000,000
+  distinct keys      772,345 (dense, first-appearance order: 0..772,344)
+  writes             685,120 (6.85%) -> R/W 93/7
+  Zipf exponent fit  1.017 (LS fit over the top 10k ranks)
+  one-hit objects    29.2%
+  sha256             75b435c113186a8e46155229e1d5ef6318f36db75715348b47b4e7a214d66b0c
+  Table 2 #Elements  772,345 (= storage_size)
+
+Regenerate
+  ./fetch_kv.sh twitter52 data/kv
+  python3 kv_pipeline.py regen data/kv/twitter52-sample \
+      --rate 0.049951171875000006 --cap 10000000 --key-cap 1250000 \
+      --out out/twitter52

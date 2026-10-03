@@ -1,0 +1,31 @@
+Provenance: workload `netflix` (Table 2 "Netflix")
+==================================================
+
+Source
+  Stephen Follows and Jose Eliel Camargo-Molina, "Netflix audience
+  behaviour - UK movies", Kaggle, 2021:
+  https://www.kaggle.com/datasets/vodclickstream/netflix-audience-behaviour-uk-movies
+  File used: vodclickstream_uk_movies_03.csv (73,892,026 bytes; 671,736
+  data rows + header; columns: <row id>,datetime,duration,title,genres,
+  release_date,movie_id,user_id). Downloading requires a Kaggle account.
+
+Window
+  All rows: 2017-01-01 00:02:21 .. 2019-06-30 23:59:20.
+
+Transformation (netflix.py)
+  * one click-stream row = one read of its movie (key = movie_id);
+  * rows sorted by datetime (stable sort: equal timestamps keep file order);
+  * movie_ids relabeled to dense integers in first-appearance order.
+  No sampling, no filtering.
+
+Result (the paper workload; reproduced byte-for-byte by netflix.py)
+  requests           671,736
+  distinct keys      8,472 (0..8,471)
+  writes             0 -> R/W 100/0
+  sha256             348382ca072673a52a17fa0280355faf8e85dab7261ffbc4f2ca97e33b2ad5ff
+  Table 2 #Elements  8,477 (= storage_size of the paper's configuration,
+                     5 more than the distinct keys; the 5 extra elements
+                     are never accessed)
+
+Regenerate
+  python3 netflix.py data/netflix/vodclickstream_uk_movies_03.csv -o out/netflix

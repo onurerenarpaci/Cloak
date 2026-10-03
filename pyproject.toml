@@ -1,0 +1,16 @@
+[project]
+name = "cloak-plots"
+version = "1.0.0"
+description = "Plotting and analysis scripts for the Cloak experiments"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "matplotlib>=3.8",
+    "numpy>=1.26",
+    "pandas>=2.1",
+    "tol-colors>=2.0",
+]
+
+[tool.uv]
+# scripts only, nothing to build or install
+package = false

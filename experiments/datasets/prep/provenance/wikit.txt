@@ -1,0 +1,45 @@
+Provenance: workload `wikit` (Table 2 "WikiT")
+==============================================
+
+Source
+  Wikimedia CDN, text (page-view) cluster, 2019 21-day trace, from the
+  cacheMon open-source cache dataset, https://github.com/cacheMon/cache_dataset
+  (CC-BY 4.0). File:
+  https://cache-datasets.s3.amazonaws.com/cache_dataset_txt/2019_wiki/wiki/2019/wiki.txt.2019.zst
+
+Record mapping
+  TSV: relative_unix \t hashed_host_path_query \t response_size \t ttfb
+  every row -> read (`key`), key = hashed_host_path_query. No pagination.
+
+Sampling (spatial hash / SHARDS, kv_pipeline.py)
+  keep request iff BLAKE2b-64(key, key="cloak1") / 2^64 < rate
+
+  Stage 1, collect:
+    rate               0.25
+    max-keep cap       60,000,000 (not reached)
+    raw lines read     207,646,002 (the whole file)
+    requests kept      52,633,462
+    distinct objects   4,599,865
+    stop reason        input_exhausted
+    trace time span    0 .. 1,814,399 s (relative timestamps) = 21.0 days
+
+  Stage 2, regen:
+    caps               10,000,000 requests / 1,250,000 distinct keys
+    rate               0.0546875
+                       (binary search for 1M distinct keys, tolerance 5%)
+    stop reason        request_cap (the 10M requests cover roughly the
+                       first 18 days of the 21-day trace)
+
+Result (the paper workload)
+  requests           10,000,000
+  distinct keys      950,243 (dense, first-appearance order: 0..950,242)
+  writes             0 -> R/W 100/0
+  Zipf exponent fit  0.791 (LS fit over the top 10k ranks)
+  one-hit objects    55.9%
+  sha256             9baf724bf2666be29f692352d1c43c1392d80be20663c64a8571abb698fe26cc
+  Table 2 #Elements  950,243 (= storage_size)
+
+Regenerate
+  ./fetch_kv.sh wikit data/kv
+  python3 kv_pipeline.py regen data/kv/wikit-sample \
+      --rate 0.0546875 --cap 10000000 --key-cap 1250000 --out out/wikit

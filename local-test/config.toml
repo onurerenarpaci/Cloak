@@ -1,0 +1,32 @@
+# Tiny single-machine configuration for the local smoke test (see README.md).
+# File names are relative to the working directory of the binaries.
+
+[common]
+server_addr = "127.0.0.1:4000"       # where the proxy reaches the storage server
+server_addr_bind = "0.0.0.0:4000"    # where the storage server listens
+proxy_addr = "127.0.0.1:5050"        # where the client reaches the proxy
+proxy_addr_bind = "0.0.0.0:5050"     # where the proxy listens
+object_size = 1024                   # plaintext object size in bytes
+crypto_overhead = 32                 # bytes added per object by AES-GCM (IV + tag); must be 32
+storage_size = 10000                 # number of objects; workload keys must be < storage_size
+
+[server]
+max_read_size = 10000000             # max objects per storage request; must be >= storage_size
+
+[proxy]
+first_batch_size = 100               # budget of the first time-set; budgets are ceil(first/i)
+queue_coefficient = 2                # back-pressure: pause intake above coefficient x batch size pending keys
+cache_size = 100                     # proxy cache entries (mini-moka: TinyLFU admission, LRU eviction)
+num_threads = 4                      # threads for per-batch encryption/decryption
+budget_log_file = "budget_log.txt"   # per-batch budget usage, summarized by budget_ratio
+is_unsafe = false                    # true = non-oblivious baseline
+batch_interval_ms = 20               # one batch per interval
+enable_budget_log = true
+
+[client]
+num_clients = 1                      # must be 1 (the proxy serves a single connection)
+req_per_sec = 10000                  # open-loop request rate
+input_file = "workload.txt"          # placeholder; scripts pass --client-input-file
+output_file = "client_output.txt"    # per-request log (only if enable_output_log)
+stats_file = "stats.csv"             # one-row summary written at the end of the run
+enable_output_log = false

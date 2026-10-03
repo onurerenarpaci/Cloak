@@ -1,0 +1,78 @@
+Provenance: workload `msr-prxy` (Table 2 "MSR prxy")
+====================================================
+
+Source
+  MSR Cambridge block I/O traces (one week, 2007; 36 volumes on 13
+  servers). Narayanan, Donnelly, Rowstron, "Write off-loading: Practical
+  power management for enterprise storage", FAST '08. Distributed by SNIA
+  IOTTA under the SNIA Trace Data Files Download License:
+  http://iotta.snia.org/traces/block-io/388
+  File: msr-cambridge1.tar (3,282,677,760 bytes; download manually, the
+  license must be accepted on the web form). It holds both volumes used
+  (prxy_0.csv.gz, prxy_1.csv.gz); msr-cambridge2.tar is not needed.
+  Server used: prxy (firewall/web proxy), BOTH volumes prxy_0 and prxy_1.
+
+Distribution
+  Not redistributed: the MSR distribution carries a Microsoft notice that
+  reserves reproduction rights. Regenerate the workload as below.
+
+Record mapping
+  CSV: Timestamp (Windows FILETIME),Hostname,DiskNumber,Type,Offset,Size,ResponseTime
+  Each I/O touching bytes [Offset, Offset+Size) becomes one request per
+  8 KiB page it touches (a zero Size counts as 1 byte):
+    pages = Offset // 8192 .. (Offset + Size - 1) // 8192
+  Read -> `key`, Write -> `key 1`. Page id = "<volume>:<page>", e.g.
+  "prxy_1:12345". The two volumes are merged in timestamp order (a
+  65,536-record sliding min-heap per volume smooths small local timestamp
+  disorder; ties are broken by volume index, then the record fields).
+  Page size 8192 was picked by maximizing
+  frac(I/Os inside one page) - frac(I/Os falsely sharing a page with a
+  byte-disjoint I/O) over 512 B .. 64 KiB on the first 2.5M I/Os of the
+  trace: 4096 -> +0.143, 8192 -> +0.201 (best), 16384 -> +0.143.
+
+Window
+  The whole trace: 2007-02-22 17:31:42 UTC .. 2007-03-01 16:59:59 UTC
+  (602,897 s = 6.98 days); no caps.
+
+Survey (unsampled pass over the window)
+  raw I/Os           181,157,932
+  page requests      370,352,362 (38.3% writes)
+  distinct pages     1,927,322
+
+Sampling (spatial hash / SHARDS, block_pipeline.py)
+  keep page iff BLAKE2b-64("<volume>:<page>", key="cloak1") < threshold
+  threshold          9571094887790794229
+                     (= the 1,000,000-th smallest distinct-page hash + 1,
+                     i.e. rate 0.5188500935203842)
+  Every request to a kept page is emitted, in time order.
+
+1M-page workload (whole week)
+  requests           185,262,952 (35.1% writes)
+  distinct pages     1,000,000 exactly (dense, first-appearance order)
+
+Result (the paper workload) = the first 10,000,000 requests of the 1M-page
+workload (`head -n 10000000`; equivalently `emit --max-requests 10000000`)
+  requests           10,000,000
+  distinct keys      63,296 (0..63,295)
+  writes             3,420,784 (34.2%) -> R/W 66/34
+  sha256             863c7e4eeef6bb31961b9b6c22cba474e615c3480239a273d4ef3697ecfffbfe
+  Table 2 #Elements  1,000,000 (= storage_size: the server holds all pages of
+                     the 1M-page workload; the 10M-request prefix touches
+                     63,296 of them)
+
+Regenerate
+  # place msr-cambridge1.tar in data/msr/, then
+  ./make_workloads.sh msr-prxy
+  # = the emit below, check_workload.py --dataset msr-prxy, and, if the
+  # SHA-256 matches, xz -T0 -6 into ../workloads/msr-prxy.xz (2 vCPUs:
+  # 1.5 min, peak RSS 230 MB). Verified byte-identical to the paper's file.
+  python3 block_pipeline.py emit msr --server prxy --page-size 8192 \
+      --msr-dir data/msr --hash-threshold 9571094887790794229 \
+      --max-requests 10000000 --out out/msr-prxy
+  # full method (finds the threshold itself):
+  python3 block_pipeline.py survey msr --server prxy --page-size 8192 \
+      --msr-dir data/msr --out data/msr/prxy-survey
+  python3 block_pipeline.py emit msr --server prxy --page-size 8192 \
+      --msr-dir data/msr --survey data/msr/prxy-survey --target 1000000 \
+      --out out/msr-prxy-1m-full
+  head -n 10000000 out/msr-prxy-1m-full > out/msr-prxy

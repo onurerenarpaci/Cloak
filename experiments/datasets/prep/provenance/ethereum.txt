@@ -1,0 +1,68 @@
+Provenance: workload `ethereum` (Table 2 "Ethereum")
+====================================================
+
+Source
+  Ethereum public dataset in Google BigQuery,
+  `bigquery-public-data.crypto_ethereum.transactions`; see Allen Day and
+  Evgeny Medvedev, "Ethereum in BigQuery: A public dataset for smart
+  contract analytics", Google Cloud blog, 2018:
+  https://cloud.google.com/blog/products/data-analytics/ethereum-bigquery-public-dataset-smart-contract-analytics
+
+Window
+  Blocks 23,049,662 .. 23,129,291, i.e. every transaction from
+  2025-08-02 00:00:11 UTC to 2025-08-13 02:58:11 UTC (the export was taken
+  a few minutes after that block): 19,066,487 transactions. Columns
+  exported: block_number, transaction_index, block_timestamp,
+  from_address, to_address. The export query was not saved;
+  ethereum.sql reconstructs it (same block range, same columns).
+
+Transformation (ethereum.py)
+  * one transaction = one read of its recipient (key = to_address); the
+    16,313 contract-creation transactions with an empty to_address all map
+    to one key "" (kept as in the original pipeline);
+  * recipients seen exactly once in the window are dropped:
+    2,340,171 distinct recipients, 1,638,858 of them seen once;
+  * keys relabeled to dense integers.
+
+Request order (important)
+  The BigQuery export came as 11 CSV shards, and the paper workload
+  concatenates them in file-name order. BigQuery's shard numbering is not
+  chronological, so the paper sequence is chronological except for two
+  displaced chunks. In blockchain time the sequence is:
+    shard  0  2025-08-02 00:00:11 .. 08-03 03:42:47 UTC
+    shard  1  2025-08-03 03:42:47 .. 08-04 06:45:59
+    shard  2  2025-08-05 02:35:23 .. 08-05 23:21:47
+    shard  3  2025-08-07 00:05:35 .. 08-07 23:37:23
+    shard  4  2025-08-04 06:45:59 .. 08-05 02:35:23   <- out of order
+    shard  5  2025-08-07 23:37:23 .. 08-09 02:37:23
+    shard  6  2025-08-09 02:37:23 .. 08-10 01:35:23
+    shard  7  2025-08-10 01:35:23 .. 08-11 02:55:11
+    shard  8  2025-08-11 02:55:11 .. 08-12 02:04:11
+    shard  9  2025-08-12 02:04:11 .. 08-13 02:58:11
+    shard 10  2025-08-05 23:21:47 .. 08-07 00:05:35   <- out of order
+  Within a shard, rows are in execution order (block_number,
+  transaction_index). The exact (block, index) boundaries are in
+  ethereum.py (PAPER_SEGMENTS); `--order paper` (default) rebuilds this
+  sequence from any export of the block range, `--order chronological`
+  gives strict execution order instead.
+
+Result (the paper workload)
+  requests           17,427,629
+  distinct keys      701,313
+  writes             0 -> R/W 100/0
+  sha256             3144c229778e411ab3d302791bf1002cd93a6cf886bc61e01dd47d2040cfd2ff
+  The paper file labels keys 1..701,313 in an arbitrary order (hash-map
+  iteration order of the original converter). ethereum.py --order paper
+  reproduces it request-for-request with a one-to-one key mapping (checked
+  against the original export), labeling keys in first-appearance order;
+  its output (default --first-id 0) has sha256
+  74539ed9f15765d7bf0565a58cac5c9fc5afc0e81f3931e87be729b87c491325.
+  Table 2 #Elements  701,317 (= storage_size of the paper's configuration,
+                     4 more than the distinct keys; never accessed)
+
+Regenerate
+  # run ethereum.sql in BigQuery, export the result as CSV to
+  # data/ethereum/ (any number of shards), then:
+  python3 ethereum.py -o out/ethereum data/ethereum/*.csv
+  python3 check_workload.py out/ethereum --dataset ethereum \
+      --same-as ../workloads/ethereum.xz

@@ -1,0 +1,41 @@
+Provenance: workload `synthetic` (Table 2 "Synthetic s = 1")
+============================================================
+
+Source
+  Generated; no external data. The same file is the s = 1.0 workload of the
+  Zipf-exponent sweep (Fig. 3, first column).
+
+Generator (`gen_workload`, src/bin/gen_workload.rs)
+  * keep all keys 0..N-1 in a recency list, most recently queried first
+    (initially 0, 1, ..., N-1);
+  * for each request i = 0..R-1: draw a rank r from a Zipf distribution
+    over 1..N with exponent s (rand_distr::Zipf), query the key at list
+    position r-1 (the key whose current reuse distance is r-1) and move it
+    to the front, which updates every other key's reuse distance;
+  * the request is a write with probability w (line `key i`, the value
+    being the request index), otherwise a read (line `key`).
+
+Parameters (paper)
+  N = 1,000,000 keys, R = 1,000,000 requests, w = 0.5, s = 1.0.
+  (The paper file came out of a 0.0..2.0 sweep with an accumulated f32
+  exponent, so s was 1.0000001; the difference is immaterial.)
+
+Result (the paper workload)
+  requests           1,000,000
+  distinct keys      173,771 (keys range over 0..999,997)
+  writes             499,977 (50.0%) -> R/W 50/50
+  sha256             39f3a9bea6efd591416fb808d908129e30d4679a4b79f0fa58da76b2d32e84e7
+  Table 2 #Elements  1,000,000 (= N = storage_size)
+
+Reproducibility
+  The paper file was generated with an unseeded (OS-seeded) RNG, so it
+  cannot be regenerated bit-for-bit; a new run gives a statistically
+  equivalent workload (same length, ~50/50 mix, ~174K distinct keys). Use
+  the shipped file (../workloads/synthetic.xz) to repeat the paper's runs.
+
+Regenerate (statistically equivalent; --seed makes it repeatable), from
+this directory after `cargo build --release` in the repository root:
+  mkdir -p out && ../../../target/release/gen_workload --out-dir out \
+      --num-keys 1000000 --num-requests 1000000 --write-ratio 0.5 \
+      --s-start 1.0 --s-end 1.0 --seed 1
+  mv out/s1.0 out/synthetic
